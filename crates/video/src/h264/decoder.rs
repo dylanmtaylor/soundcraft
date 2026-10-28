@@ -7,7 +7,7 @@
 //! concurrently (frame-level parallelism).
 
 use crate::bitstream::{BitReader, annexb_nals, length_prefixed_nals, unescape_rbsp};
-use crate::h264::dpb::{Dpb, Output, OutputMeta};
+use crate::h264::dpb::{Dpb, Output, OutputMeta, PictureToStore};
 use crate::h264::error::{Error, Result, ensure, invalid, unsupported};
 use crate::h264::params::{Pps, Sps};
 use crate::h264::picture::{Frame, FrameRef, MbKind, MbState, Planes, RefPic};
@@ -497,7 +497,17 @@ impl Decoder {
         let meta = Arc::new(OutputMeta { draft, ..output_meta(&sps, pts, key) });
         let mut outs = Vec::new();
         let fpoc = frame.poc;
-        self.dpb.store_picture(&first, frame, fpoc, sps.max_frame_num(), sps.max_num_ref_frames as usize, meta, &mut outs);
+        self.dpb.store_picture(
+            PictureToStore {
+                header: &first,
+                frame,
+                poc: fpoc,
+                max_frame_num: sps.max_frame_num(),
+                max_num_ref_frames: sps.max_num_ref_frames as usize,
+                meta,
+            },
+            &mut outs,
+        );
         self.emit(outs);
     }
 

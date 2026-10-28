@@ -94,6 +94,28 @@ struct Scratch {
     alpha: Vec<u16>,
 }
 
+#[derive(Clone, Copy)]
+struct SliceGeometry {
+    mb_x: usize,
+    macroblocks: usize,
+    line_step: usize,
+    parity: usize,
+}
+
+struct BlockOutput<'a> {
+    plane: &'a mut [u16],
+    stride: usize,
+    rows: usize,
+    line_step: usize,
+    parity: usize,
+}
+
+#[derive(Clone, Copy)]
+struct BlockPosition {
+    x: usize,
+    y: usize,
+}
+
 impl Scratch {
     fn new() -> Scratch {
         Scratch { coeffs: vec![[0f32; 64]; 32], alpha: vec![0; 16 * 128] }
@@ -212,8 +234,14 @@ pub fn decode_frame_into(data: &[u8], opts: &DecodeOptions, out: &mut Frame) -> 
             for (k, &w) in widths.iter().enumerate() {
                 let si = row * widths.len() + k;
                 let (start, len) = pic.slices[si];
-                decode_slice(&ctx, &data[start..start + len], mb_x, w, band, step, pic.parity, scratch)
-                    .map_err(|_| Error::Slice { picture: pi, slice: si })?;
+                decode_slice(
+                    &ctx,
+                    &data[start..start + len],
+                    SliceGeometry { mb_x, macroblocks: w, line_step: step, parity: pic.parity },
+                    band,
+                    scratch,
+                )
+                .map_err(|_| Error::Slice { picture: pi, slice: si })?;
                 mb_x += w;
             }
         }
@@ -266,17 +294,8 @@ fn qfactors(qmat: &[u8; 64], qs: u32) -> [f32; 64] {
     q
 }
 
-#[allow(clippy::too_many_arguments)]
-fn decode_slice(
-    ctx: &Ctx,
-    d: &[u8],
-    mb_x: usize,
-    mbs: usize,
-    band: &mut Band,
-    step: usize,
-    parity: usize,
-    s: &mut Scratch,
-) -> std::result::Result<(), ()> {
+fn decode_slice(ctx: &Ctx, d: &[u8], geometry: SliceGeometry, band: &mut Band, s: &mut Scratch) -> std::result::Result<(), ()> {
+    let SliceGeometry { mb_x, macroblocks: mbs, line_step: step, parity } = geometry;
     if d.len() < 6 {
         return Err(());
     }
@@ -312,7 +331,12 @@ fn decode_slice(
     for (b, blk) in s.coeffs[..nb].iter_mut().enumerate() {
         idct8x8(blk);
         let (mb, i) = (b >> 2, b & 3);
-        put_block(blk, band.y, ctx.width, x0 + mb * 16 + (i & 1) * 8, (i >> 1) * 8, band.rows, step, parity, ctx.conv);
+        put_block(
+            blk,
+            BlockOutput { plane: band.y, stride: ctx.width, rows: band.rows, line_step: step, parity },
+            BlockPosition { x: x0 + mb * 16 + (i & 1) * 8, y: (i >> 1) * 8 },
+            ctx.conv,
+        );
     }
 
     // Chroma
@@ -330,7 +354,12 @@ fn decode_slice(
                 let (mb, i) = (b >> 1, b & 1);
                 (mb_x * 8 + mb * 8, i * 8)
             };
-            put_block(blk, plane, ctx.cwidth, bx, by, band.rows, step, parity, ctx.conv);
+            put_block(
+                blk,
+                BlockOutput { plane, stride: ctx.cwidth, rows: band.rows, line_step: step, parity },
+                BlockPosition { x: bx, y: by },
+                ctx.conv,
+            );
         }
     }
 
@@ -482,9 +511,10 @@ fn decode_alpha(data: &[u8], ty: AlphaType, out: &mut [u16]) -> std::result::Res
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 #[inline]
-fn put_block(f: &[f32; 64], plane: &mut [u16], stride: usize, x0: usize, y0: usize, rows: usize, step: usize, parity: usize, conv: OutConv) {
+fn put_block(f: &[f32; 64], output: BlockOutput<'_>, position: BlockPosition, conv: OutConv) {
+    let BlockOutput { plane, stride, rows, line_step: step, parity } = output;
+    let BlockPosition { x: x0, y: y0 } = position;
     if x0 >= stride {
         return;
     }

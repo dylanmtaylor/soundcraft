@@ -577,14 +577,14 @@ impl SliceDecoder<'_> {
                     }
                     let direct_mask: u8 = (0..4).filter(|&p| self.cur.sub[p].direct).map(|p| 1u8 << p).sum();
                     self.mb_mut().direct8x8 = direct_mask;
-                    for l in 0..2 {
+                    for (l, &ref_count) in n_ref.iter().enumerate() {
                         for p in 0..4 {
                             let sub = self.cur.sub[p];
                             if sub.direct || sub.pred & (1 << l) == 0 {
                                 continue;
                             }
                             let (x, y) = ((p & 1) * 2, (p >> 1) * 2);
-                            let r = if n_ref[l] > 1 && !info.ref0 { self.decode_ref_idx(c, l, x, y) as i8 } else { 0 };
+                            let r = if ref_count > 1 && !info.ref0 { self.decode_ref_idx(c, l, x, y) as i8 } else { 0 };
                             self.cur.ref_idx[l][p] = r;
                             self.set_cur_ref(l, x, y, 2, 2, r);
                         }
@@ -608,13 +608,13 @@ impl SliceDecoder<'_> {
                     }
                 } else {
                     let np = info.part.num_parts();
-                    for l in 0..2 {
+                    for (l, &ref_count) in n_ref.iter().enumerate() {
                         for p in 0..np {
                             if info.pred[p] & (1 << l) == 0 {
                                 continue;
                             }
                             let (x, y, w, h) = info.part.rect(p);
-                            let r = if n_ref[l] > 1 { self.decode_ref_idx(c, l, x, y) as i8 } else { 0 };
+                            let r = if ref_count > 1 { self.decode_ref_idx(c, l, x, y) as i8 } else { 0 };
                             self.cur.ref_idx[l][p] = r;
                             self.set_cur_ref(l, x, y, w, h, r);
                         }

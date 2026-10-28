@@ -34,12 +34,12 @@ fn load_edge(plane: &[u8], stride: usize, x: usize, y: usize, n: usize, a: Avail
     let mut e = Edge { top: [128; 16], left: [128; 8], tl: 128 };
     if a.top {
         let row = &plane[(y - 1) * stride + x..];
-        for i in 0..n {
-            e.top[i] = row[i] as i32;
+        for (i, &sample) in row.iter().take(n).enumerate() {
+            e.top[i] = sample as i32;
         }
         if a.top_right {
-            for i in n..2 * n {
-                e.top[i] = row[i] as i32;
+            for (i, &sample) in row.iter().take(2 * n).enumerate().skip(n) {
+                e.top[i] = sample as i32;
             }
         } else {
             let v = e.top[n - 1];

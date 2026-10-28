@@ -54,6 +54,16 @@ pub struct Output {
     pub meta: Arc<OutputMeta>,
 }
 
+/// Reference marking and output information for a decoded picture entering the DPB.
+pub struct PictureToStore<'a> {
+    pub header: &'a SliceHeader,
+    pub frame: FrameRef,
+    pub poc: i32,
+    pub max_frame_num: u32,
+    pub max_num_ref_frames: usize,
+    pub meta: Arc<OutputMeta>,
+}
+
 impl Dpb {
     pub fn new() -> Self {
         Dpb { entries: Vec::new(), max_long_term_frame_idx: None, capacity: 16, max_reorder: 16 }
@@ -123,7 +133,6 @@ impl Dpb {
     }
 
     /// Insert "non-existing" frames for a frame_num gap (8.2.5.2).
-    #[allow(clippy::too_many_arguments)]
     pub fn fill_frame_num_gap(
         &mut self,
         prev_ref_frame_num: u32,
@@ -323,17 +332,8 @@ impl Dpb {
 
     /// Reference marking for the just-decoded picture and insertion into the DPB with output bumping.
     /// Returns pictures ready for output.
-    #[allow(clippy::too_many_arguments)]
-    pub fn store_picture(
-        &mut self,
-        sh: &SliceHeader,
-        frame: FrameRef,
-        poc: i32,
-        max_frame_num: u32,
-        max_num_ref_frames: usize,
-        meta: Arc<OutputMeta>,
-        out: &mut Vec<Output>,
-    ) {
+    pub fn store_picture(&mut self, picture: PictureToStore<'_>, out: &mut Vec<Output>) {
+        let PictureToStore { header: sh, frame, poc, max_frame_num, max_num_ref_frames, meta } = picture;
         let mut mark = RefMark::Unused;
         let mut long_idx = 0;
         let mut had5 = false;

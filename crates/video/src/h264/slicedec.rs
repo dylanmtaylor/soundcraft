@@ -221,23 +221,40 @@ pub struct SliceDecoder<'a> {
 
 /// Interpolate a bw x bh luma block at (px, py) with motion vector `mv` from reference `f` into `y`,
 /// and the corresponding chroma blocks into `c` (stride `cs`).
-#[allow(clippy::too_many_arguments)]
+struct PredictionOutput<'a> {
+    luma: &'a mut [u8],
+    luma_stride: usize,
+    chroma: [&'a mut [u8]; 2],
+    chroma_stride: usize,
+}
+
+struct MvpQuery {
+    list: usize,
+    x: usize,
+    y: usize,
+    width: usize,
+    ref_idx: i8,
+    shape: u8,
+    part: usize,
+}
+
 #[inline]
-fn predict_block(f: &Frame, mv: [i16; 2], px: usize, py: usize, bw: usize, bh: usize, y: (&mut [u8], usize), c: [&mut [u8]; 2], cs: usize) {
+fn predict_block(f: &Frame, mv: [i16; 2], block: inter::Block, output: PredictionOutput<'_>) {
     const LW: usize = 24;
     let mut win = [0u8; LW * 21];
-    let ix = px as i32 + (mv[0] as i32 >> 2);
-    let iy = py as i32 + (mv[1] as i32 >> 2);
+    let inter::Block { x: px, y: py, width: bw, height: bh, .. } = block;
+    let ix = px + (mv[0] as i32 >> 2);
+    let iy = py + (mv[1] as i32 >> 2);
     f.luma_window(ix - 2, iy - 2, bw + 5, bh + 5, &mut win, LW);
-    inter::mc_luma_win(&win, LW, (mv[0] & 3) as u32, (mv[1] & 3) as u32, bw, bh, y.0, y.1);
-    let cx = (px / 2) as i32 + (mv[0] as i32 >> 3);
-    let cy = (py / 2) as i32 + (mv[1] as i32 >> 3);
+    inter::mc_luma_win(&win, LW, block.window(), output.luma, output.luma_stride);
+    let cx = px / 2 + (mv[0] as i32 >> 3);
+    let cy = py / 2 + (mv[1] as i32 >> 3);
     let (cw, ch) = (bw / 2, bh / 2);
     let (fx, fy) = ((mv[0] & 7) as u32, (mv[1] & 7) as u32);
-    for (comp, out) in c.into_iter().enumerate() {
+    for (comp, out) in output.chroma.into_iter().enumerate() {
         let mut w = [0u8; 16 * 9];
         f.chroma_window(comp, (cx, cy), cw + 1, ch + 1, &mut w, 16);
-        inter::mc_chroma_win(&w, 16, fx, fy, cw, ch, out, cs);
+        inter::mc_chroma_win(&w, 16, inter::Window::new(fx, fy, cw, ch), out, output.chroma_stride);
     }
 }
 
@@ -463,9 +480,9 @@ impl<'a> SliceDecoder<'a> {
     }
 
     /// Luma motion vector prediction (8.4.1.3). `shape`: 1 = 16x8, 2 = 8x16, 0 = other.
-    #[allow(clippy::too_many_arguments)]
-    fn mvp(&self, list: usize, x: usize, y: usize, w: usize, ref_idx: i8, shape: u8, part: usize) -> [i16; 2] {
-        let (a, b, c) = self.nb_abc(list, x, y, w);
+    fn mvp(&self, query: MvpQuery) -> [i16; 2] {
+        let MvpQuery { list, x, y, width, ref_idx, shape, part } = query;
+        let (a, b, c) = self.nb_abc(list, x, y, width);
         if shape == 1 {
             if part == 0 && b.ref_idx == ref_idx {
                 return b.mv;
@@ -506,17 +523,17 @@ impl<'a> SliceDecoder<'a> {
         for yy in y..y + h {
             for xx in x..x + w {
                 let r = yy * 4 + xx;
-                for l in 0..2 {
-                    st.mv[l][r] = if refs[l] >= 0 { mvs[l] } else { [0, 0] };
+                for (l, (&ref_idx, &mv)) in refs.iter().zip(&mvs).enumerate() {
+                    st.mv[l][r] = if ref_idx >= 0 { mv } else { [0, 0] };
                 }
                 self.mv_done |= 1 << r;
             }
         }
-        for l in 0..2 {
+        for (l, &ref_idx) in refs.iter().enumerate() {
             // ref_idx is per 8x8; rectangles never straddle 8x8 blocks with different refs
             for yy in (y..y + h).step_by(1) {
                 for xx in x..x + w {
-                    st.ref_idx[l][(yy >> 1) * 2 + (xx >> 1)] = refs[l];
+                    st.ref_idx[l][(yy >> 1) * 2 + (xx >> 1)] = ref_idx;
                 }
             }
         }
@@ -639,7 +656,7 @@ impl<'a> SliceDecoder<'a> {
         let mv = if self.nb[0].is_none() || self.nb[1].is_none() || (a.ref_idx == 0 && a.mv == [0, 0]) || (b.ref_idx == 0 && b.mv == [0, 0]) {
             [0, 0]
         } else {
-            self.mvp(0, 0, 0, 4, 0, 0, 0)
+            self.mvp(MvpQuery { list: 0, x: 0, y: 0, width: 4, ref_idx: 0, shape: 0, part: 0 })
         };
         self.set_motion(0, 0, 4, 4, [0, -1], [mv, [0, 0]]);
     }
@@ -665,7 +682,7 @@ impl<'a> SliceDecoder<'a> {
                     if info.pred[p] & (1 << l) != 0 {
                         let r = self.cur.ref_idx[l][p];
                         ensure!((r as usize) < n[l], "ref_idx {r} out of range (list {l}, size {})", n[l]);
-                        let mvp = self.mvp(l, x, y, w, r, shape, p);
+                        let mvp = self.mvp(MvpQuery { list: l, x, y, width: w, ref_idx: r, shape, part: p });
                         let d = self.cur.mvd[l][p * 4];
                         refs[l] = r;
                         mvs[l] = [mvp[0].wrapping_add(d[0]), mvp[1].wrapping_add(d[1])];
@@ -696,7 +713,7 @@ impl<'a> SliceDecoder<'a> {
                 let mut mvs = [[0i16; 2]; 2];
                 for l in 0..2 {
                     if refs[l] >= 0 {
-                        let mvp = self.mvp(l, x, y, w, refs[l], 0, 0);
+                        let mvp = self.mvp(MvpQuery { list: l, x, y, width: w, ref_idx: refs[l], shape: 0, part: 0 });
                         let d = self.cur.mvd[l][p * 4 + j];
                         mvs[l] = [mvp[0].wrapping_add(d[0]), mvp[1].wrapping_add(d[1])];
                     }
@@ -767,13 +784,13 @@ impl<'a> SliceDecoder<'a> {
             predict_block(
                 f,
                 mvs[l],
-                px,
-                py,
-                bw,
-                bh,
-                (&mut planes.y[py * ys + px..], ys),
-                [&mut planes.cb[cy * cs + cx..], &mut planes.cr[cy * cs + cx..]],
-                cs,
+                inter::Block::new(px as i32, py as i32, (mvs[l][0] & 3) as u32, (mvs[l][1] & 3) as u32, bw, bh),
+                PredictionOutput {
+                    luma: &mut planes.y[py * ys + px..],
+                    luma_stride: ys,
+                    chroma: [&mut planes.cb[cy * cs + cx..], &mut planes.cr[cy * cs + cx..]],
+                    chroma_stride: cs,
+                },
             );
             return;
         }
@@ -784,16 +801,23 @@ impl<'a> SliceDecoder<'a> {
             }
             let Some(rp) = self.refs[l].get(refs[l] as usize) else { continue };
             let [pc0, pc1] = &mut s.pred_c[l];
-            predict_block(&rp.frame, mvs[l], px, py, bw, bh, (&mut s.pred[l][..], 16), [&mut pc0[..], &mut pc1[..]], 8);
+            predict_block(
+                &rp.frame,
+                mvs[l],
+                inter::Block::new(px as i32, py as i32, (mvs[l][0] & 3) as u32, (mvs[l][1] & 3) as u32, bw, bh),
+                PredictionOutput { luma: &mut s.pred[l][..], luma_stride: 16, chroma: [&mut pc0[..], &mut pc1[..]], chroma_stride: 8 },
+            );
         }
         inter::weighted_store(
             &mut self.pic.planes.y[py * ys + px..],
             ys,
-            if use0 { Some(&s.pred[0][..]) } else { None },
-            if use1 { Some(&s.pred[1][..]) } else { None },
-            16,
-            bw,
-            bh,
+            inter::Predictions {
+                first: if use0 { Some(&s.pred[0][..]) } else { None },
+                second: if use1 { Some(&s.pred[1][..]) } else { None },
+                stride: 16,
+                width: bw,
+                height: bh,
+            },
             wts[0],
         );
         for c in 0..2 {
@@ -801,7 +825,12 @@ impl<'a> SliceDecoder<'a> {
             let a = if use0 { Some(&s.pred_c[0][c][..]) } else { None };
             let b = if use1 { Some(&s.pred_c[1][c][..]) } else { None };
             let plane = if c == 0 { &mut self.pic.planes.cb } else { &mut self.pic.planes.cr };
-            inter::weighted_store(&mut plane[cy * cs + cx..], cs, a, b, 8, bw / 2, bh / 2, wc);
+            inter::weighted_store(
+                &mut plane[cy * cs + cx..],
+                cs,
+                inter::Predictions { first: a, second: b, stride: 8, width: bw / 2, height: bh / 2 },
+                wc,
+            );
         }
     }
 
@@ -877,13 +906,8 @@ impl<'a> SliceDecoder<'a> {
     pub fn derive_intra_modes(&mut self, is8x8: bool) {
         let step = if is8x8 { 2 } else { 1 };
         let nblk = if is8x8 { 4 } else { 16 };
-        for i in 0..nblk {
-            let (bx, by) = if is8x8 {
-                ((i & 1) * 2, (i >> 1) * 2)
-            } else {
-                let (x, y) = BLK4_XY[i];
-                (x as usize, y as usize)
-            };
+        for (i, &(block_x, block_y)) in BLK4_XY.iter().enumerate().take(nblk) {
+            let (bx, by) = if is8x8 { ((i & 1) * 2, (i >> 1) * 2) } else { (block_x as usize, block_y as usize) };
             let a = if bx > 0 { Some(self.mb().intra_modes[by * 4 + bx - 1]) } else { self.intra_mode_nb(0, 3, by) };
             let b = if by > 0 { Some(self.mb().intra_modes[(by - 1) * 4 + bx]) } else { self.intra_mode_nb(1, bx, 3) };
             let pred = match (a, b) {
@@ -1294,13 +1318,13 @@ impl<'a> SliceDecoder<'a> {
                         let Some(sub) = sub else { return invalid(format!("sub_mb_type {t} out of range")) };
                         self.cur.sub[p] = sub;
                     }
-                    for l in 0..2 {
+                    for (l, &ref_count) in n_ref.iter().enumerate() {
                         for p in 0..4 {
                             let sub = self.cur.sub[p];
                             if sub.direct || sub.pred & (1 << l) == 0 {
                                 continue;
                             }
-                            self.cur.ref_idx[l][p] = if n_ref[l] > 1 && !info.ref0 { Self::read_te(r, n_ref[l] - 1)? as i8 } else { 0 };
+                            self.cur.ref_idx[l][p] = if ref_count > 1 && !info.ref0 { Self::read_te(r, ref_count - 1)? as i8 } else { 0 };
                         }
                     }
                     for l in 0..2 {
@@ -1318,10 +1342,10 @@ impl<'a> SliceDecoder<'a> {
                     }
                 } else {
                     let np = info.part.num_parts();
-                    for l in 0..2 {
+                    for (l, &ref_count) in n_ref.iter().enumerate() {
                         for p in 0..np {
                             if info.pred[p] & (1 << l) != 0 {
-                                self.cur.ref_idx[l][p] = if n_ref[l] > 1 { Self::read_te(r, n_ref[l] - 1)? as i8 } else { 0 };
+                                self.cur.ref_idx[l][p] = if ref_count > 1 { Self::read_te(r, ref_count - 1)? as i8 } else { 0 };
                             }
                         }
                     }

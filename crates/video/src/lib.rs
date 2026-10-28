@@ -23,7 +23,6 @@
 //! pixel conversion and the frame caches are SoundCraft's own.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 // Codec code indexes fixed-size blocks; index loops read more clearly than iterator chains there.
-#![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 
 pub mod convert;
 pub mod h264;

@@ -322,13 +322,13 @@ fn boundary_strengths(pic: &PicState, q: &MbState, sq: &SliceInfo, left: Option<
     // bS[dir][edge][segment]; dir 0 = vertical edges (x), 1 = horizontal edges (y)
     let mut bs = [[[0u8; 4]; 4]; 2];
     if q.kind.is_intra() {
-        for dir in 0..2 {
+        for (dir, edges) in bs.iter_mut().enumerate() {
             if (if dir == 0 { left } else { top }).is_some() {
-                bs[dir][0] = [4; 4];
+                edges[0] = [4; 4];
             }
-            for e in 1..4 {
+            for (e, edge) in edges.iter_mut().enumerate().skip(1) {
                 if !(t8 && e % 2 == 1) {
-                    bs[dir][e] = [3; 4];
+                    *edge = [3; 4];
                 }
             }
         }
@@ -339,17 +339,17 @@ fn boundary_strengths(pic: &PicState, q: &MbState, sq: &SliceInfo, left: Option<
             r[1] == r[0] && r[2] == r[0] && r[3] == r[0] && q.mv[l].iter().all(|m| *m == q.mv[l][0])
         });
         let qm: [Motion; 16] = std::array::from_fn(|r| block_motion(q, &qids, r));
-        for dir in 0..2 {
+        for (dir, edges) in bs.iter_mut().enumerate() {
             let neighbor = if dir == 0 { left } else { top };
             if let Some(n) = neighbor {
                 let p = &pic.mbs[n];
                 if p.kind.is_intra() {
-                    bs[dir][0] = [4; 4];
+                    edges[0] = [4; 4];
                 } else {
                     let pids = ref_ids8(p, &pic.slices[p.slice_num as usize]);
-                    for k in 0..4 {
+                    for (k, edge_segment) in edges[0].iter_mut().enumerate() {
                         let (rq, rp) = if dir == 0 { (k * 4, k * 4 + 3) } else { (k, 12 + k) };
-                        bs[dir][0][k] = if (p.nz_mask >> rp) & 1 != 0 || (q.nz_mask >> rq) & 1 != 0 {
+                        *edge_segment = if (p.nz_mask >> rp) & 1 != 0 || (q.nz_mask >> rq) & 1 != 0 {
                             2
                         } else {
                             motion_bs(&block_motion(p, &pids, rp), &qm[rq])
@@ -361,13 +361,13 @@ fn boundary_strengths(pic: &PicState, q: &MbState, sq: &SliceInfo, left: Option<
                 // one motion for the whole MB and no coefficients: all internal edges have bS 0
                 continue;
             }
-            for e in 1..4 {
+            for (e, edge) in edges.iter_mut().enumerate().skip(1) {
                 if t8 && e % 2 == 1 {
                     continue;
                 }
-                for k in 0..4 {
+                for (k, segment) in edge.iter_mut().enumerate() {
                     let (rq, rp) = if dir == 0 { (k * 4 + e, k * 4 + e - 1) } else { (e * 4 + k, e * 4 + k - 4) };
-                    bs[dir][e][k] = if (q.nz_mask >> rp) & 1 != 0 || (q.nz_mask >> rq) & 1 != 0 { 2 } else { motion_bs(&qm[rp], &qm[rq]) };
+                    *segment = if (q.nz_mask >> rp) & 1 != 0 || (q.nz_mask >> rq) & 1 != 0 { 2 } else { motion_bs(&qm[rp], &qm[rq]) };
                 }
             }
         }
@@ -384,13 +384,13 @@ fn filter_luma(
     params: &impl Fn(i32, i32, [u8; 4]) -> EdgeParams,
 ) {
     let width = pic.planes.width;
-    for dir in 0..2 {
-        for e in 0..4 {
-            if bs[dir][e] == [0; 4] {
+    for (dir, edges) in bs.iter().enumerate() {
+        for (e, &strengths) in edges.iter().enumerate() {
+            if strengths == [0; 4] {
                 continue;
             }
             let qpp = if e == 0 { p_qp[dir].map(|p| p.0).unwrap_or(q_qp) } else { q_qp };
-            let ep = params(qpp, q_qp, bs[dir][e]);
+            let ep = params(qpp, q_qp, strengths);
             if ep.alpha == 0 || ep.beta == 0 {
                 // filterSamplesFlag needs |p0 - q0| < alpha and |p1 - p0| < beta (8.7.2.2): no
                 // sample of the edge changes (low QPs)
@@ -415,15 +415,15 @@ fn filter_chroma(
 ) {
     let cwidth = pic.planes.cwidth;
     // chroma (4:2:0): edges at chroma samples 0 and 4 use the bS of luma edges 0 and 2
-    for c in 0..2 {
+    for (c, &qpc) in q_qpc.iter().enumerate() {
         for dir in 0..2 {
             for ce in 0..2 {
                 let e = ce * 2;
                 if bs[dir][e] == [0; 4] {
                     continue;
                 }
-                let qpp = if e == 0 { p_qp[dir].map(|p| p.1[c]).unwrap_or(q_qpc[c]) } else { q_qpc[c] } as i32;
-                let ep = params(qpp, q_qpc[c] as i32, bs[dir][e]);
+                let qpp = if e == 0 { p_qp[dir].map(|p| p.1[c]).unwrap_or(qpc) } else { qpc } as i32;
+                let ep = params(qpp, qpc as i32, bs[dir][e]);
                 if ep.alpha == 0 || ep.beta == 0 {
                     continue;
                 }

@@ -12,6 +12,51 @@ pub struct PlaneRef<'a> {
 
 const WIN: usize = 16 + 5;
 
+/// Position and fractional offset of one interpolated luma or chroma block.
+#[derive(Clone, Copy)]
+pub(crate) struct Block {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) fx: u32,
+    pub(crate) fy: u32,
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+}
+
+impl Block {
+    pub(crate) const fn new(x: i32, y: i32, fx: u32, fy: u32, width: usize, height: usize) -> Self {
+        Self { x, y, fx, fy, width, height }
+    }
+
+    pub(crate) fn window(self) -> Window {
+        Window { fx: self.fx, fy: self.fy, width: self.width, height: self.height }
+    }
+}
+
+/// Fraction and dimensions for interpolation from a prepared source window.
+#[derive(Clone, Copy)]
+pub(crate) struct Window {
+    pub(crate) fx: u32,
+    pub(crate) fy: u32,
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+}
+
+impl Window {
+    pub(crate) const fn new(fx: u32, fy: u32, width: usize, height: usize) -> Self {
+        Self { fx, fy, width, height }
+    }
+}
+
+/// One or two predictions with a shared row stride and block dimensions.
+pub(crate) struct Predictions<'a> {
+    pub(crate) first: Option<&'a [u8]>,
+    pub(crate) second: Option<&'a [u8]>,
+    pub(crate) stride: usize,
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+}
+
 /// Copy the (bw+5)x(bh+5) window whose top-left is (x-2, y-2) into `win` (stride WIN), clamping
 /// coordinates to the picture.
 #[cfg(test)]
@@ -93,9 +138,9 @@ fn vtap_row(rows: [&[u8]; 6], out: &mut [i32], n: usize) {
 /// Luma sample interpolation for a bw x bh block (8.4.2.2.1). (x, y) is the integer sample position
 /// (block position + (mv >> 2)); (fx, fy) the quarter-sample fraction. Output stride is `os`.
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-pub fn mc_luma(p: PlaneRef, x: i32, y: i32, fx: u32, fy: u32, bw: usize, bh: usize, out: &mut [u8], os: usize) {
+pub fn mc_luma(p: PlaneRef, block: Block, out: &mut [u8], os: usize) {
     let mut win = [0u8; WIN * WIN];
+    let Block { x, y, width: bw, height: bh, .. } = block;
     let (x0, y0) = (x - 2, y - 2);
     let inside = x0 >= 0 && y0 >= 0 && x0 as usize + bw + 5 <= p.width && y0 as usize + bh + 5 <= p.height;
     let (src, ss): (&[u8], usize) = if inside {
@@ -104,13 +149,13 @@ pub fn mc_luma(p: PlaneRef, x: i32, y: i32, fx: u32, fy: u32, bw: usize, bh: usi
         fetch_window(p, x, y, bw, bh, &mut win);
         (&win[..], WIN)
     };
-    mc_luma_win(src, ss, fx, fy, bw, bh, out, os);
+    mc_luma_win(src, ss, block.window(), out, os);
 }
 
 /// Luma interpolation from a prepared window: `src[0]` is the sample at (x - 2, y - 2) and `ss` the
 /// window stride; the window covers (bw + 5) x (bh + 5) samples.
-#[allow(clippy::too_many_arguments)]
-pub fn mc_luma_win(src: &[u8], ss: usize, fx: u32, fy: u32, bw: usize, bh: usize, out: &mut [u8], os: usize) {
+pub fn mc_luma_win(src: &[u8], ss: usize, block: Window, out: &mut [u8], os: usize) {
+    let Window { fx, fy, width: bw, height: bh } = block;
     // window row r (0..bh+5) starts at src[r * ss]; sample G of block (r, c) is at window (r + 2, c + 2)
     let wrow = |r: usize| &src[r * ss..r * ss + bw + 5];
     let mut t = [0i32; 16];
@@ -218,8 +263,8 @@ pub fn mc_luma_win(src: &[u8], ss: usize, fx: u32, fy: u32, bw: usize, bh: usize
 /// Chroma sample interpolation (8.4.2.2.2) for a bw x bh block at integer position (x, y) with
 /// eighth-sample fraction (fx, fy).
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-pub fn mc_chroma(p: PlaneRef, x: i32, y: i32, fx: u32, fy: u32, bw: usize, bh: usize, out: &mut [u8], os: usize) {
+pub fn mc_chroma(p: PlaneRef, block: Block, out: &mut [u8], os: usize) {
+    let Block { x, y, width: bw, height: bh, .. } = block;
     let maxx = p.width as i32 - 1;
     let maxy = p.height as i32 - 1;
     let inside = x >= 0 && y >= 0 && x + bw as i32 <= maxx && y + bh as i32 <= maxy;
@@ -236,13 +281,13 @@ pub fn mc_chroma(p: PlaneRef, x: i32, y: i32, fx: u32, fy: u32, bw: usize, bh: u
         }
         (&win[..], 9)
     };
-    mc_chroma_win(src, ss, fx, fy, bw, bh, out, os);
+    mc_chroma_win(src, ss, block.window(), out, os);
 }
 
 /// Chroma interpolation from a prepared (bw + 1) x (bh + 1) window whose first sample is the integer
 /// position of the block.
-#[allow(clippy::too_many_arguments)]
-pub fn mc_chroma_win(src: &[u8], ss: usize, fx: u32, fy: u32, bw: usize, bh: usize, out: &mut [u8], os: usize) {
+pub fn mc_chroma_win(src: &[u8], ss: usize, block: Window, out: &mut [u8], os: usize) {
+    let Window { fx, fy, width: bw, height: bh } = block;
     let (fx, fy) = (fx as u16, fy as u16);
     let (w00, w10, w01, w11) = ((8 - fx) * (8 - fy), fx * (8 - fy), (8 - fx) * fy, fx * fy);
     if fx == 0 && fy == 0 {
@@ -272,8 +317,8 @@ pub enum Weight {
 }
 
 /// Combine prediction(s) into `dst` (stride `ds`). `p0`/`p1` have stride `ps`.
-#[allow(clippy::too_many_arguments)]
-pub fn weighted_store(dst: &mut [u8], ds: usize, p0: Option<&[u8]>, p1: Option<&[u8]>, ps: usize, bw: usize, bh: usize, w: Weight) {
+pub fn weighted_store(dst: &mut [u8], ds: usize, prediction: Predictions<'_>, w: Weight) {
+    let Predictions { first: p0, second: p1, stride: ps, width: bw, height: bh } = prediction;
     match (p0, p1, w) {
         (Some(a), Some(b), Weight::Default) => {
             for r in 0..bh {
@@ -328,8 +373,8 @@ mod reference {
 
     /// Luma sample interpolation for a bw x bh block. (x, y) is the integer sample position
     /// (block position + (mv >> 2)); (fx, fy) the quarter-sample fraction. Output stride is `os`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn mc_luma_ref(p: PlaneRef, x: i32, y: i32, fx: u32, fy: u32, bw: usize, bh: usize, out: &mut [u8], os: usize) {
+    pub fn mc_luma_ref(p: PlaneRef, block: Block, out: &mut [u8], os: usize) {
+        let Block { x, y, fx, fy, width: bw, height: bh } = block;
         let mut win = [0u8; WIN * WIN];
         fetch_window(p, x, y, bw, bh, &mut win);
         // sample G at (r, c) in block coordinates is win[(r + 2) * WIN + c + 2]
@@ -441,10 +486,10 @@ mod tests {
         let d = plane(16, 16, |x, y| (x + 16 * y) as u8);
         let p = PlaneRef { data: &d, width: 16, height: 16, stride: 16 };
         let mut out = [0u8; 16];
-        mc_luma(p, 2, 3, 0, 0, 4, 4, &mut out, 4);
+        mc_luma(p, Block::new(2, 3, 0, 0, 4, 4), &mut out, 4);
         assert_eq!(&out[..4], &[50, 51, 52, 53]);
         // clamped: far outside to the top-left gives sample (0,0)
-        mc_luma(p, -40, -40, 0, 0, 4, 4, &mut out, 4);
+        mc_luma(p, Block::new(-40, -40, 0, 0, 4, 4), &mut out, 4);
         assert!(out.iter().all(|&v| v == 0));
     }
 
@@ -455,9 +500,9 @@ mod tests {
         for fx in 0..4 {
             for fy in 0..4 {
                 let mut out = [0u8; 64];
-                mc_luma(p, 8, 8, fx, fy, 8, 8, &mut out, 8);
+                mc_luma(p, Block::new(8, 8, fx, fy, 8, 8), &mut out, 8);
                 assert!(out.iter().all(|&v| v == 100), "{fx},{fy}");
-                mc_chroma(p, 8, 8, fx * 2, fy * 2, 8, 8, &mut out, 8);
+                mc_chroma(p, Block::new(8, 8, fx * 2, fy * 2, 8, 8), &mut out, 8);
                 assert!(out.iter().all(|&v| v == 100));
             }
         }
@@ -469,9 +514,9 @@ mod tests {
         let d = plane(32, 32, |x, _| (x * 4) as u8);
         let p = PlaneRef { data: &d, width: 32, height: 32, stride: 32 };
         let mut out = [0u8; 16];
-        mc_luma(p, 8, 8, 2, 0, 4, 4, &mut out, 4);
+        mc_luma(p, Block::new(8, 8, 2, 0, 4, 4), &mut out, 4);
         assert_eq!(&out[..4], &[34, 38, 42, 46]);
-        mc_luma(p, 8, 8, 1, 0, 4, 4, &mut out, 4);
+        mc_luma(p, Block::new(8, 8, 1, 0, 4, 4), &mut out, 4);
         assert_eq!(&out[..4], &[33, 37, 41, 45]);
     }
 
@@ -491,8 +536,9 @@ mod tests {
                     for &(x, y) in &[(10, 9), (-3, -5), (30, 30), (0, 0), (2, 2), (38, 1)] {
                         let mut a = [0u8; 256];
                         let mut b = [0u8; 256];
-                        mc_luma(p, x, y, fx, fy, bw, bh, &mut a, 16);
-                        reference::mc_luma_ref(p, x, y, fx, fy, bw, bh, &mut b, 16);
+                        let block = Block::new(x, y, fx, fy, bw, bh);
+                        mc_luma(p, block, &mut a, 16);
+                        reference::mc_luma_ref(p, block, &mut b, 16);
                         assert_eq!(a, b, "{bw}x{bh} frac {fx},{fy} at {x},{y}");
                     }
                 }
@@ -505,9 +551,14 @@ mod tests {
         let a = [100u8; 4];
         let b = [50u8; 4];
         let mut d = [0u8; 4];
-        weighted_store(&mut d, 4, Some(&a), Some(&b), 4, 4, 1, Weight::Default);
+        weighted_store(&mut d, 4, Predictions { first: Some(&a), second: Some(&b), stride: 4, width: 4, height: 1 }, Weight::Default);
         assert_eq!(d, [75; 4]);
-        weighted_store(&mut d, 4, Some(&a), None, 4, 4, 1, Weight::Weighted { log_wd: 5, w0: 16, w1: 0, o0: 3, o1: 0 });
+        weighted_store(
+            &mut d,
+            4,
+            Predictions { first: Some(&a), second: None, stride: 4, width: 4, height: 1 },
+            Weight::Weighted { log_wd: 5, w0: 16, w1: 0, o0: 3, o1: 0 },
+        );
         assert_eq!(d, [53; 4]);
     }
 }
