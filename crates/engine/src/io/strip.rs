@@ -75,6 +75,16 @@ impl From<&soundcraft_model::AutoName> for StripNames {
     }
 }
 
+/// Processing settings for one Strip Silence operation.
+#[derive(Clone, Copy, Debug)]
+pub struct StripOptions {
+    pub threshold: f32,
+    pub min_length: Samples,
+    pub padding: (Samples, Samples),
+    pub mode: StripMode,
+    pub preserve_names: bool,
+}
+
 /// Names the audio clips that lie inside `r` on `t` with `names`, in time order, the first of them
 /// `next` places after `names.number`. Returns how many clips it named.
 pub fn name_stripped_clips(s: &mut Session, t: TrackId, r: Range, names: &StripNames, next: u64) -> u64 {
@@ -97,19 +107,10 @@ pub fn name_stripped_clips(s: &mut Session, t: TrackId, r: Range, names: &StripN
 /// `Extract`. The new pieces that are kept take Auto Rename names in time order, and the removed
 /// ones do not. When `named` is true the caller names the audio clips left inside `r` with
 /// [`name_stripped_clips`], so those clips do not take Auto Rename names either.
-#[allow(clippy::too_many_arguments)]
-pub fn strip_silence(
-    s: &mut Session,
-    t: TrackId,
-    r: Range,
-    thr: f32,
-    min_len: Samples,
-    pad: (Samples, Samples),
-    mode: StripMode,
-    named: bool,
-) -> Result<usize> {
+pub fn strip_silence(s: &mut Session, t: TrackId, r: Range, options: StripOptions) -> Result<usize> {
+    let StripOptions { threshold, min_length, padding, mode, preserve_names } = options;
     let r = bounded_to_track(s, t, r);
-    let keep = non_silent(s, t, r, thr, min_len, pad, &AtomicBool::new(false))?;
+    let keep = non_silent(s, t, r, threshold, min_length, padding, &AtomicBool::new(false))?;
     let mut cut_points = vec![r.start];
     for (a, b) in &keep {
         cut_points.push(*a);
@@ -121,7 +122,7 @@ pub fn strip_silence(
         crate::edit::separate_at_if(s, t, *p, |_| false);
     }
     let kept = strip_pieces(s, t, r, &keep, mode);
-    crate::edit::auto_name_new_clips(s, t, &old, |c| !(named && c.is_audio() && c.start >= r.start && c.end() <= r.end));
+    crate::edit::auto_name_new_clips(s, t, &old, |c| !(preserve_names && c.is_audio() && c.start >= r.start && c.end() <= r.end));
     Ok(kept)
 }
 

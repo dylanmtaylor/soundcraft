@@ -863,7 +863,12 @@ fn strip_silence(e: &mut Engine, p: &Value) -> Result<Value> {
     let mut kept = 0;
     let mut named = 0;
     for t in &tracks {
-        kept += crate::io::strip_silence(s, *t, r, thr, min_len, (pre, post), mode, names.is_some())?;
+        kept += crate::io::strip_silence(
+            s,
+            *t,
+            r,
+            crate::io::StripOptions { threshold: thr, min_length: min_len, padding: (pre, post), mode, preserve_names: names.is_some() },
+        )?;
         if let Some(names) = &names {
             named += crate::io::name_stripped_clips(s, *t, r, names, named);
         }

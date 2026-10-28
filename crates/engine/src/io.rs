@@ -27,7 +27,9 @@ pub use record::{Recording, Take, add_recording, live_span, place_recording};
 pub use render::{commit_track, consolidate, refuse_longer, render_clip_gain, render_limit, sanitize_name};
 pub(crate) use session::{DecodedFiles, decode_file, open_session_linked};
 pub use session::{open_session, save_copy, save_session, save_session_copy};
-pub use strip::{StripMode, StripNames, StripScan, bounded_to_track, name_stripped_clips, strip_silence, strip_silence_ranges, transients_in};
+pub use strip::{
+    StripMode, StripNames, StripOptions, StripScan, bounded_to_track, name_stripped_clips, strip_silence, strip_silence_ranges, transients_in,
+};
 
 // ─── Checked file access ──────────────────────────────────────────────────────────────────────
 //
